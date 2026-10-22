@@ -1,0 +1,73 @@
+{
+ "acetyl": {
+  "margin": "-13.6 dec.",
+  "sites": {
+   "gas:NH2": {
+    "status": "valid",
+    "Ea_eV": 0.36722988533176704,
+    "barrierless": false
+   },
+   "gas:NH_bridge": {
+    "status": "valid",
+    "Ea_eV": 0.05,
+    "barrierless": true
+   },
+   "gas:OH": {
+    "status": "valid",
+    "Ea_eV": 0.0,
+    "barrierless": true
+   }
+  },
+  "attempts": 6,
+  "usable": 6,
+  "rescued": [
+   "SCF: electronic temperature 1000 K",
+   "band: 11 images",
+   "neb: +1500 steps"
+  ],
+  "fastest_SiO2_eV": 0.0,
+  "slowest_SiNx_eV": 0.36722988533176704,
+  "margin_decades": -13.587325514600673
+ },
+ "bench": {
+  "gain20": "2.5 dec.",
+  "saving80": "16%"
+ },
+ "candidates": [
+  {
+   "name": "pivaldehyde",
+   "cls": "aldehyde",
+   "call": "value/cost 2.96"
+  },
+  {
+   "name": "glutaraldehyde",
+   "cls": "dialdehyde",
+   "call": "value/cost 2.96"
+  },
+  {
+   "name": "propanoyl chloride",
+   "cls": "acyl chloride",
+   "call": "value/cost 2.38"
+  },
+  {
+   "name": "BDMADMS",
+   "cls": "aminosilane",
+   "call": "control (prefers SiO\u2082)"
+  },
+  {
+   "name": "cyclic azasilane",
+   "cls": "cyclic azasilane",
+   "call": "no barrier model yet"
+  }
+ ],
+ "aldehydes": {
+  "pivaldehyde": null,
+  "glutaraldehyde": null
+ },
+ "aldehyde": {
+  "big": "next",
+  "small": "aldehydes queued for barrier calculations",
+  "spoken": "The aldehydes are next in the queue."
+ },
+ "fig4_aspect": 0.4716208308952604
+}
