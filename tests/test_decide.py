@@ -339,3 +339,10 @@ def test_benchmark_world_classes_and_library():
                   world={"library_size": 3})
     assert {x["policy"] for x in r["runs"]} == {"warden_voi", "warden_voi_no_sharing"}
     assert all(x["spent"] <= 12. for x in r["runs"])
+
+
+def test_focus_limits_actions_but_not_the_ranking():
+    b = separated_belief()
+    agent = dc.Agent(b, ["xtb"], (), dc.DEFAULTS, focus=["b"])
+    assert {a.candidate for a in agent.actions() if a.kind == "observe"} == {"b"}
+    assert set(b.scores()) == {"a", "b"} and b.contention()["a"] > 0

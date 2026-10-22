@@ -31,7 +31,14 @@ H_EVS = 4.135667696e-15
 DEFAULTS = {"method": "xtb", "n_images": 7, "fmax": 0.05, "neb_fmax": 0.1,
             "steps": 300, "neb_steps": 1500, "attack_distance_A": 2.8,
             "cluster_shells": 3, "orientations": 4, "barrier_orientations": 2,
-            "max_image_jump_eV": 1.5, "min_barrier_eV": 0.05, "seed": 42}
+            "max_image_jump_eV": 1.5, "min_barrier_eV": 0.05, "seed": 42,
+            # xTB electronic structure (defaults are tblite's own)
+            "xtb_electronic_temperature_K": 300., "xtb_max_iterations": 250,
+            # Numerical rescue, one targeted retry per failure type (measured on gas-phase
+            # acetyl chloride: each recovered a failed attempt). Successful attempts cost nothing extra.
+            "rescue": True, "xtb_rescue_temperature_K": 1000., "rescue_n_images": 11, "neb_rescue_steps": 1500,
+            # A site with no usable barrier after barrier_orientations gets more, up to this many.
+            "max_barrier_orientations": 4}
 STRUCTURE_FACTOR = 1.15
 CAP_LENGTH = {14: 1.48, 8: 0.97, 7: 1.01, 6: 1.09}
 BOND_LENGTH = {("silyl_substitution", 8): 1.65, ("silyl_substitution", 7): 1.75,
@@ -49,7 +56,9 @@ def calculator_factory(config):
     method = config.get("method", "xtb")
     if method == "xtb":
         from tblite.ase import TBLite
-        return lambda: TBLite(method=config.get("xtb_method", "GFN2-xTB"), verbosity=0)
+        kwargs = {"electronic_temperature": float(config.get("xtb_electronic_temperature_K", 300.)),
+                  "max_iterations": int(config.get("xtb_max_iterations", 250))}
+        return lambda: TBLite(method=config.get("xtb_method", "GFN2-xTB"), verbosity=0, **kwargs)
     if method == "mace":
         from .engine import calculator
         shared = calculator(config)
@@ -297,7 +306,39 @@ def check_product(atoms, m):
 
 
 def barrier(substrate, site, normal, frozen, spec, factory, config, artifact=None, orientation=0, pathway=None):
+    """One NEB attempt, with one targeted rescue when it fails numerically (config rescue):
+
+      SCF not converged (xTB)  rerun the attempt at xtb_rescue_temperature_K (Fermi smearing)
+      band_unresolved          rerun with rescue_n_images images (the band was too sparse)
+      neb_not_converged        continue the band for neb_rescue_steps (inside _attempt)
+
+    A rescued result records what was changed in "rescue". Chemistry outcomes are
+    never retried: a rescue only changes numerical settings.
+    """
     config = {**DEFAULTS, **config}
+    args = (substrate, site, normal, frozen, spec)
+    try:
+        result = _attempt(*args, factory, config, artifact, orientation, pathway)
+    except Exception as exc:
+        if not (config["rescue"] and "SCF not converged" in str(exc) and config.get("method", "xtb") == "xtb"):
+            raise
+        hot = {**config, "xtb_electronic_temperature_K": config["xtb_rescue_temperature_K"],
+               "xtb_max_iterations": max(500, int(config["xtb_max_iterations"]))}
+        result = _attempt(*args, calculator_factory(hot), hot, artifact, orientation, pathway)
+        result["rescue"] = f"SCF: electronic temperature {hot['xtb_electronic_temperature_K']:.0f} K"
+        return result
+    if config["rescue"] and result["status"] == "band_unresolved" and config["n_images"] < config["rescue_n_images"]:
+        dense = {**config, "n_images": config["rescue_n_images"]}
+        try:
+            retry = _attempt(*args, factory, dense, artifact, orientation, pathway)
+        except Exception:
+            return result
+        retry["rescue"] = f"band: {dense['n_images']} images"
+        return retry
+    return result
+
+
+def _attempt(substrate, site, normal, frozen, spec, factory, config, artifact, orientation, pathway):
     reactant, product, m = endpoints(substrate, site, normal, spec, config, orientation, pathway)
     reactant, e_r = _relax(reactant, factory, frozen, config["fmax"], config["steps"])
     check_reactant(reactant, m)
@@ -312,6 +353,10 @@ def barrier(substrate, site, normal, frozen, spec, factory, config, artifact=Non
     FIRE(neb, logfile=None).run(fmax=0.5, steps=config["neb_steps"] // 4)
     neb.climb = True
     converged = FIRE(neb, logfile=None).run(fmax=config["neb_fmax"], steps=config["neb_steps"])
+    rescue = None
+    if not converged and config["rescue"] and config["neb_rescue_steps"] > 0:
+        converged = FIRE(neb, logfile=None).run(fmax=config["neb_fmax"], steps=config["neb_rescue_steps"])
+        rescue = f"neb: +{config['neb_rescue_steps']} steps"
     profile = np.array([float(im.get_potential_energy()) for im in images]) - e_r
     clash = any(_clash(im) for im in images)
     if artifact:
@@ -319,7 +364,8 @@ def barrier(substrate, site, normal, frozen, spec, factory, config, artifact=Non
         write(str(artifact), images)
     return {**classify(profile, converged, clash, config),
             "path": str(Path(artifact).resolve()) if artifact else None,
-            "e_reactant_complex_eV": e_r}
+            "e_reactant_complex_eV": e_r, "n_images": config["n_images"],
+            **({"rescue": rescue} if rescue else {})}
 
 
 def classify(profile, converged, clash, config):
@@ -434,6 +480,17 @@ def reclassify(record, config=None):
     return record
 
 
+def current_records(store):
+    """The kinetics records to use: the latest per (candidate, site set, method).
+
+    Re-runs after code or setting changes are stored as new records; reading all
+    of them double-counts one measurement and lets an arbitrary (id-hash order)
+    stale record win where one record per method is kept.
+    """
+    from .decide import latest_kinetics
+    return latest_kinetics(store.all("kinetics"), [e["id"] for e in store.events("kinetics_finished")])
+
+
 def apply_observations(record, observations):
     """Fill failed sites of a kinetics record from decision-agent observations.
 
@@ -528,7 +585,10 @@ def screen_kinetics(spec, sites, config, artifact_dir):
         except Exception:
             e_substrate = None
         best = None
-        for orientation in range(config["barrier_orientations"]):
+        for orientation in range(max(config["barrier_orientations"], config["max_barrier_orientations"])):
+            # Extra orientations only for a site that still has no usable barrier.
+            if orientation >= config["barrier_orientations"] and select_best(row["attempts"], s["material"], config):
+                break
             try:
                 r = barrier(s["substrate"], s["site"], s["normal"], s["frozen"], spec, factory, config,
                             Path(artifact_dir) / f"{spec['id']}_{s['label'].replace(':', '_')}_{orientation}.extxyz",

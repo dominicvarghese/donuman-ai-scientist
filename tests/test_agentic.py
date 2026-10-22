@@ -205,9 +205,13 @@ def test_gas_site_runner_passes_no_manifest(tmp_path, monkeypatch):
     runner, repairer = subprocess_runner(tmp_path / "db", tmp_path / "m.json", tmp_path / "c.json", 10,
                                          kinetics=True, kinetics_sites="gas")
     runner(["c1"], 0); repairer(["c1"], 2.0)
-    kinetics, decide = calls[1], calls[3]
+    kinetics = next(c for c in calls if c[3] == "kinetics")
+    repair = next(c for c in calls if c[3] == "decide" and "--methods" in c)
+    refresh = [c for c in calls if c[3] == "decide" and "--dry-run" in c]
     assert kinetics[kinetics.index("--sites") + 1] == "gas" and "--manifest" not in kinetics
-    assert decide[decide.index("--methods") + 1] == "mace" and "--manifest" not in decide
+    assert repair[repair.index("--methods") + 1] == "mace" and "--manifest" not in repair
+    # Every assessment is followed by a no-compute ranking refresh on the same sites.
+    assert len(refresh) == 2 and all("--manifest" not in c and "gas" in c for c in refresh)
     with pytest.raises(ValueError):
         subprocess_runner(tmp_path / "db", None, None, 1, kinetics_sites="slab")
 
@@ -227,3 +231,23 @@ def test_repair_action_is_budgeted_and_needs_kinetics(tmp_path):
     assert calls == [([ACYL["id"]], 5.0), ([ACYL["id"]], 5.0)]
     assert any("Repair budget exhausted" in e["text"] for e in s2.all("notebook"))
     s.close(); s2.close()
+
+
+def test_failed_adsorption_screen_does_not_block_barriers(monkeypatch, tmp_path):
+    import subprocess
+    from warden import campaign
+    ran = []
+    def fake_run(command, check, timeout):
+        ran.append(command[3])
+        if command[3] == "screen":
+            raise subprocess.CalledProcessError(1, command)
+    monkeypatch.setattr(campaign.subprocess, "run", fake_run)
+    runner, _ = campaign.subprocess_runner(tmp_path / "db", tmp_path / "m.json", tmp_path / "c.json", 10,
+                                           kinetics=True, kinetics_sites="gas")
+    runner(["c1"], 0)
+    # Barriers, assessment, then a no-compute refresh of the agent's ranking.
+    assert ran == ["screen", "kinetics", "assess", "decide"]
+    # Without kinetics there is nothing else to run: the failure is raised.
+    runner, _ = campaign.subprocess_runner(tmp_path / "db", tmp_path / "m.json", tmp_path / "c.json", 10)
+    with pytest.raises(subprocess.CalledProcessError):
+        runner(["c1"], 0)

@@ -85,7 +85,8 @@ def kinetic_context(store):
     assessment = store.get("assessment", "latest") or {}
     designs = {c["candidate_id"]: c.get("design") or {} for c in assessment.get("candidates", [])}
     out = []
-    for k in store.all("kinetics"):
+    from .kinetics import current_records
+    for k in current_records(store):
         d = designs.get(k["candidate_id"], {})
         rec = d.get("recommended") or {}
         out.append({"candidate_id": k["candidate_id"], "method": k["method"], "summary": k["summary"],
@@ -125,6 +126,7 @@ def _record_papers(store, text, evidence_id, step):
 
 def _summarize_outcome(store, ids):
     """Deterministic notebook line per computed candidate."""
+    from .kinetics import current_records
     names = {c["id"]: c.get("name", c["id"]) for c in store.all("candidate")}
     lines = []
     for cid in ids:
@@ -135,7 +137,7 @@ def _summarize_outcome(store, ids):
             part.append(f"adsorption {best.get('status')}"
                         + (f", contrast {best['contrast_eV']:+.2f} eV" if best.get("contrast_eV") is not None else "")
                         + (f" ({best.get('reason')})" if best.get("reason") else ""))
-        for k in store.all("kinetics"):
+        for k in current_records(store):
             if k.get("candidate_id") == cid:
                 failed = [s["label"] for s in k["sites"] if s["status"] != "valid"]
                 d = (k.get("summary") or {}).get("dEa_GS_minus_NGS_eV")
@@ -344,13 +346,25 @@ def subprocess_runner(db, manifest, config_path, timeout, kinetics=False, contro
         subprocess.run([sys.executable, "-m", "warden", "assess", "--db", str(db),
                         "--config", str(config_path), "--out", str(Path(db).parent / "assess"),
                         *(["--controls", str(controls)] if controls else [])], check=True, timeout=timeout)
+        # Refresh the agent's ranking (no calculations) so the planner and critic always see
+        # agent_ranking for the current evidence, not only after a repair.
+        subprocess.run([sys.executable, "-m", "warden", "decide", "--db", str(db), "--config", str(config_path),
+                        *sites, "--dry-run", "--out", str(Path(db).parent / "decide_plan")],
+                       check=True, timeout=timeout)
 
     def runner(ids, fidelity):
         command = [sys.executable, "-m", "warden", "screen", "--db", str(db),
                    "--manifest", str(manifest), "--config", str(config_path),
                    "--ids", *ids, "--fidelity", str(fidelity)]
         # The worker owns MACE; its exit frees GPU allocations before the next LLM call.
-        subprocess.run(command, check=True, timeout=timeout)
+        try:
+            subprocess.run(command, check=True, timeout=timeout)
+        except subprocess.CalledProcessError:
+            # Barriers are the selectivity criterion: a failed adsorption screen must not
+            # stop them. Without kinetics there is nothing else to run, so it is an error.
+            if not kinetics:
+                raise
+            print(f"warning: adsorption screen failed for {ids}; computing barriers anyway", file=sys.stderr)
         if kinetics:
             subprocess.run([sys.executable, "-m", "warden", "kinetics", "--db", str(db),
                             "--config", str(config_path), "--ids", *ids, *sites], check=True, timeout=timeout)

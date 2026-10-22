@@ -113,6 +113,34 @@ def validate_candidate(spec, evidence=None, require_evidence=False):
     return spec
 
 
+def screenable(raws, evidence=None):
+    """(validated specs with a barrier model, skipped [{name, reason}]) from supplied entries.
+
+    Skips entries marked not computable, wrong-direction references
+    (predicted_direction prefers_SiO2: compute them as controls) and invalid ones,
+    so one unusable entry in a literature file does not stop a run.
+    """
+    specs, skipped = [], []
+    for raw in raws:
+        if raw.get("computable") is False:
+            skipped.append({"name": raw.get("name"), "reason": raw.get("status") or "marked not computable"})
+            continue
+        if raw.get("predicted_direction") == "prefers_SiO2":
+            skipped.append({"name": raw.get("name"),
+                            "reason": "reference predicted to prefer SiO2 (control, not a candidate)"})
+            continue
+        try:
+            spec = validate_candidate(raw, evidence)
+        except ValueError as exc:
+            skipped.append({"name": raw.get("name"), "reason": str(exc)})
+            continue
+        if spec["template"] not in ATTACHING:
+            skipped.append({"name": spec["name"], "reason": f"template {spec['template']} has no barrier model"})
+            continue
+        specs.append(spec)
+    return specs, skipped
+
+
 def rotation(source, target):
     # Copy: callers pass rows of position arrays, which in-place normalisation would move.
     source, target = np.array(source, float), np.array(target, float)

@@ -35,6 +35,10 @@ level of a split config apply to both roles.
 Ready-made: `config/v3-openai.json` (OpenAI for both roles) and
 `config/v3-hybrid.json` (local planner, OpenAI critic). Set `model` to an
 OpenAI model your account can use that supports Structured Outputs.
+For result quality, prefer the stronger model as the **planner**: planning
+(reading kinetics, notebook and literature, choosing the action) is the harder
+task; the critic only checks one proposal. A local planner with an OpenAI
+critic saves cost but limits what the campaign can find.
 
 ## Check, then run
 

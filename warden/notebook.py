@@ -54,9 +54,9 @@ def _evidence(store, candidate_id):
             else:
                 rows.append({"kind": "adsorption", "fidelity": r.get("fidelity", 0), "value_eV": None,
                              "direction": None, "status": r.get("status")})
-    from .kinetics import reclassify
+    from .kinetics import current_records, reclassify
     from .lit import window_margin
-    for k in store.all("kinetics"):
+    for k in current_records(store):
         if k.get("candidate_id") != candidate_id:
             continue
         # Re-scored under current rules: a barrierless oxide path is a fast reaction,

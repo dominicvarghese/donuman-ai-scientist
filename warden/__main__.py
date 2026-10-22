@@ -37,7 +37,7 @@ def lit_brief_command(args):
     store = Store(args.db)
     try:
         candidates = {c['id']: c for c in store.all('candidate')}
-        records, skipped = gather([kin.reclassify(r, rules) for r in store.all('kinetics')],
+        records, skipped = gather([kin.reclassify(r, rules) for r in kin.current_records(store)],
                                   store.all('observation'), candidates, rules)
     finally:
         store.close()
@@ -158,8 +158,11 @@ def kinetics_command(args):
     try:
         ids = args.ids or []
         if args.candidates:
-            for raw in read_json(args.candidates):
-                candidate = validate_candidate(raw)
+            from .chemistry import screenable
+            specs, skipped = screenable(read_json(args.candidates))
+            for item in skipped:
+                print(f"candidate skipped: {item['name']}: {item['reason']}")
+            for candidate in specs:
                 store.put('candidate', candidate['id'], candidate)
                 ids.append(candidate['id'])
         admitted, fingerprint = True, 'gas_models'
@@ -209,12 +212,12 @@ def assess_command(args):
             options[key] = tuple(options[key])
     store = Store(args.db)
     try:
-        from .kinetics import DEFAULTS, apply_observations, reclassify
+        from .kinetics import DEFAULTS, apply_observations, current_records, reclassify
         rules = {**DEFAULTS, **config.get('kinetics', {})}
         # Stored NEB profiles are re-judged under the current rules; no recomputation.
         # Barriers the decision agent obtained on retries fill sites the screen missed.
         observations = store.all('observation')
-        records = [apply_observations(reclassify(r, rules), observations) for r in store.all('kinetics')]
+        records = [apply_observations(reclassify(r, rules), observations) for r in current_records(store)]
         controls = read_json(args.controls) if args.controls else []
         result = assess(records, controls, params, options)
         store.put('assessment', 'latest', result)
@@ -246,32 +249,17 @@ def decide_command(args):
                                   config.get('kinetics', {}).get('cluster_shells', 3))
         else:
             sites = kin.sites_for('gas')
-        candidates = {c['id']: c for c in store.all('candidate') if c['template'] in kin.ATTACHING
-                      and (not args.ids or c['id'] in args.ids)}
+        # The belief keeps every candidate (ranking, learning across molecules); --ids only
+        # limits which candidates the agent may compute on.
+        candidates = {c['id']: c for c in store.all('candidate') if c['template'] in kin.ATTACHING}
         if args.ids and set(args.ids) - set(candidates):
             raise ValueError('Unknown or non-substitution candidate ids: ' + ', '.join(sorted(set(args.ids) - set(candidates))))
-        library, skipped = [], []
-        evidence = {e['id']: e for e in store.all('evidence')}
-        for raw in (read_json(args.library) if args.library else []):
-            # One unusable entry (a mechanism not implemented, a bad name) must not stop the
-            # run: it is skipped and reported. Literature-backed entries (from lit-import)
-            # carry evidence references, re-checked against this database's evidence.
-            if raw.get('computable') is False:
-                skipped.append({'name': raw.get('name'), 'reason': raw.get('status') or 'marked not computable'})
-                continue
-            if raw.get('predicted_direction') == 'prefers_SiO2':
-                # A wrong-direction reference: compute it as a control (`warden kinetics`), not as a candidate.
-                skipped.append({'name': raw.get('name'), 'reason': 'reference predicted to prefer SiO2 (control, not a candidate)'})
-                continue
-            try:
-                spec = validate_candidate(raw, evidence)
-            except ValueError as exc:
-                skipped.append({'name': raw.get('name'), 'reason': str(exc)})
-                continue
-            if spec['template'] not in kin.ATTACHING:
-                skipped.append({'name': spec['name'], 'reason': f"template {spec['template']} has no barrier model"})
-            elif spec['id'] not in candidates:
-                library.append(spec)
+        # Literature-backed entries (from lit-import) carry evidence references,
+        # re-checked against this database's evidence; unusable entries are reported.
+        from .chemistry import screenable
+        specs, skipped = screenable(read_json(args.library) if args.library else [],
+                                    {e['id']: e for e in store.all('evidence')})
+        library = [spec for spec in specs if spec['id'] not in candidates]
         for item in skipped:
             print(f"library entry skipped: {item['name']}: {item['reason']}")
         if args.candidates:
@@ -299,7 +287,7 @@ def decide_command(args):
             print(f"decide budget: {budget:.1f} this run ({spent_before:.1f} of {args.total_budget:.1f} spent before)")
 
         def next_actions(budget_left):
-            _, shortlist = dc.Agent(belief, methods, library, cfg).choose(budget_left)
+            _, shortlist = dc.Agent(belief, methods, library, cfg, focus=args.ids).choose(budget_left)
             return [f"{a.kind} {belief.candidates.get(a.candidate, {}).get('name', a.extra.get('name', ''))} "
                     f"{a.site or ''} {a.pathway or ''} {a.method or ''}: value/cost {a.score():.3g}, "
                     f"P(success) {a.p_success:.2f}" for a in shortlist]
@@ -324,7 +312,7 @@ def decide_command(args):
                     store.put('observation', digest(record['result'] | {'step': record['step']}), record['result'])
                 print(record['step'], record['action']['kind'], record['action'].get('site'),
                       record['action'].get('method'), '->', (record.get('result') or {}).get('status', record.get('added')))
-            result = dc.run(belief, executor, budget, library, methods, cfg, log)
+            result = dc.run(belief, executor, budget, library, methods, cfg, log, focus=args.ids)
             result["budget"] = budget
             result["stop"] = next((t["stop"] for t in reversed(result["trace"]) if "stop" in t), "max_steps")
             for cid, spec in belief.candidates.items():

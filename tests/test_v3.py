@@ -283,3 +283,86 @@ def test_barrierless_attempts_seed_successes_not_failures():
     assert ("gas:NH_bridge", "valid", "barrierless") in by_status
     # Genuine numerical failures stay failures.
     assert any(o.status != "valid" for o in obs if o.site == "gas:NH_bridge")
+
+
+# --- numerical rescue and adaptive orientations -----------------------------------
+
+def _ok(status="valid", **extra):
+    return {"status": status, "Ea_eV": .4, "image_clash": False, **extra}
+
+
+def test_scf_failure_is_rescued_once_at_higher_electronic_temperature(monkeypatch):
+    calls = []
+    def attempt(*args):
+        config = args[6]
+        calls.append(config["xtb_electronic_temperature_K"])
+        if len(calls) == 1:
+            raise RuntimeError("SCF not converged in 250 cycles")
+        return _ok()
+    monkeypatch.setattr(kin, "_attempt", attempt)
+    monkeypatch.setattr(kin, "calculator_factory", lambda config: "hot-factory")
+    r = kin.barrier(None, 0, None, [], {}, "factory", {"method": "xtb"})
+    assert calls == [300., 1000.] and r["rescue"].startswith("SCF")
+    # Chemistry and other errors are not retried; a second SCF failure is reported.
+    monkeypatch.setattr(kin, "_attempt", lambda *a: (_ for _ in ()).throw(ValueError("product_not_formed")))
+    with pytest.raises(ValueError, match="product_not_formed"):
+        kin.barrier(None, 0, None, [], {}, "factory", {"method": "xtb"})
+    with pytest.raises(RuntimeError):
+        monkeypatch.setattr(kin, "_attempt", lambda *a: (_ for _ in ()).throw(RuntimeError("SCF not converged")))
+        kin.barrier(None, 0, None, [], {}, "factory", {"method": "xtb"})
+
+
+def test_unresolved_band_is_retried_with_more_images(monkeypatch):
+    seen = []
+    def attempt(*args):
+        seen.append(args[6]["n_images"])
+        return _ok("band_unresolved") if len(seen) == 1 else _ok("barrierless")
+    monkeypatch.setattr(kin, "_attempt", attempt)
+    r = kin.barrier(None, 0, None, [], {}, "factory", {})
+    assert seen == [7, 11] and r["status"] == "barrierless" and r["rescue"] == "band: 11 images"
+    # Rescue off: the original failure stands.
+    seen.clear()
+    assert kin.barrier(None, 0, None, [], {}, "factory", {"rescue": False})["status"] == "band_unresolved"
+    assert seen == [7]
+
+
+def test_extra_orientations_only_for_sites_without_a_usable_barrier(monkeypatch):
+    sites = [s for s in kin.sites_for("gas") if s["label"] in ("gas:OH", "gas:NH2")]
+    def barrier(substrate, site, normal, frozen, spec, factory, config, artifact, orientation, pathway=None):
+        # gas:OH fails twice numerically, then works; gas:NH2 works at once.
+        if substrate is sites[0]["substrate"] and orientation < 2:
+            return {"status": "neb_not_converged", "Ea_eV": None}
+        return {"status": "valid", "Ea_eV": .5, "dE_rxn_eV": -.3, "stepwise_indication": False,
+                "precomplex_shift_eV": 0., "e_reactant_complex_eV": -1.}
+    monkeypatch.setattr(kin, "barrier", barrier)
+    monkeypatch.setattr(kin, "relaxed_energy", lambda *a: 0.)
+    monkeypatch.setattr(kin, "calculator_factory", lambda config: None)
+    spec = validate_candidate({"name": "acetyl chloride", "smiles": "C[C:1](=O)[Cl:2]", "template": "acylation"})
+    rec = kin.screen_kinetics(spec, sites, {"barrier_orientations": 2, "max_barrier_orientations": 4}, "/tmp")
+    tried = {s["label"]: [a["orientation"] for a in s["attempts"]] for s in rec["sites"]}
+    assert tried[sites[0]["label"]] == [0, 1, 2] and tried[sites[1]["label"]] == [0, 1]
+    assert all(s["status"] == "valid" for s in rec["sites"])
+
+
+def test_current_records_keep_the_latest_rerun(tmp_path):
+    from warden.store import Store
+    s = Store(tmp_path / "k.sqlite")
+    for rid in ("k_old", "k_new"):
+        s.put("kinetics", rid, {"id": rid, "candidate_id": "a", "method": "xtb", "surface_fingerprint": "gas_models"})
+        s.event("kinetics_finished", {"id": rid})
+    s.put("kinetics", "k_mace", {"id": "k_mace", "candidate_id": "a", "method": "mace", "surface_fingerprint": "gas_models"})
+    assert sorted(r["id"] for r in kin.current_records(s)) == ["k_mace", "k_new"]
+    s.close()
+
+
+def test_screenable_reports_unusable_entries():
+    from warden.chemistry import screenable
+    specs, skipped = screenable([
+        {"name": "ok", "smiles": "CC[C:1](=O)[Cl:2]", "template": "acylation"},
+        {"name": "control", "smiles": "C[Si:1](C)(N(C)C)[N:2](C)C", "template": "silyl_substitution",
+         "predicted_direction": "prefers_SiO2"},
+        {"name": "ring", "smiles": "CN1CC(C)C[Si]1(C)C", "template": "silyl_ring_opening", "computable": False},
+        {"name": "physisorbed", "smiles": "c1ccncc1", "template": "physisorption"},
+        {"name": "broken", "smiles": "C[C:1](=O)", "template": "acylation"}])
+    assert [s["name"] for s in specs] == ["ok"]
+    assert [x["name"] for x in skipped] == ["control", "ring", "physisorbed", "broken"]

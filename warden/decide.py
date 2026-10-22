@@ -437,11 +437,13 @@ class Action:
 class Agent:
     """Knowledge-gradient evidence acquisition over molecules, sites, pathways and methods."""
 
-    def __init__(self, belief, methods_available, library=(), cfg=None):
+    def __init__(self, belief, methods_available, library=(), cfg=None, focus=None):
         self.belief = belief
         self.cfg = {**DEFAULTS, **(cfg or {})}
         self.methods_available = list(methods_available)
         self.library = list(library)
+        # Candidates the agent may compute on (None: all). Scores and contention still use all.
+        self.focus = set(focus) if focus else None
 
     def actions(self):
         b, cfg = self.belief, self.cfg
@@ -452,6 +454,8 @@ class Agent:
         contention = b.contention() if len(b.candidates) > 1 else {c: 1. for c in b.candidates}
         sens = 1 / (KB_EV * np.mean(cfg["temperatures"]) * np.log(10))  # decades per eV
         for cid in b.candidates:
+            if self.focus is not None and cid not in self.focus:
+                continue
             others = max([v for c, v in scores.items() if c != cid], default=-np.inf)
             spec = b.candidates[cid]
             binding = b.binding(cid)
@@ -584,9 +588,10 @@ def confident_stop(belief, agent, pcs):
     return scores[max(scores, key=scores.get)] > 0 or not agent.library
 
 
-def run(belief, executor, budget, library=(), methods=("xtb",), cfg=None, log=None, max_steps=200):
-    """Closed loop: choose, execute, update, until confident or out of budget."""
-    agent = Agent(belief, methods, library, cfg)
+def run(belief, executor, budget, library=(), methods=("xtb",), cfg=None, log=None, max_steps=200, focus=None):
+    """Closed loop: choose, execute, update, until confident or out of budget.
+    focus: candidate ids the agent may compute on (a repair); None means all."""
+    agent = Agent(belief, methods, library, cfg, focus)
     spent, trace = 0., []
     for step in range(max_steps):
         pcs = belief.pcs()

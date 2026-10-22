@@ -1,3 +1,29 @@
+# Robustness review of master (numerical rescue, pipeline wiring)
+
+Measured on this code with GFN2-xTB, gas-phase acetyl chloride: 3 of 6 NEB
+attempts failed numerically (SCF not converged, band_unresolved,
+neb_not_converged). Rerunning each with one targeted change recovered all three:
+electronic temperature 1000 K (500 SCF iterations alone did not), 11 images
+instead of 7, and 1500 further band steps.
+
+- `kinetics.barrier`: one targeted rescue per numerical failure (config `rescue`,
+  `xtb_rescue_temperature_K`, `rescue_n_images`, `neb_rescue_steps`); a rescued
+  attempt records `rescue`. Chemistry outcomes are never retried.
+- `screen_kinetics`: a site with no usable barrier after `barrier_orientations`
+  gets more orientations, up to `max_barrier_orientations` (4).
+- xTB `xtb_electronic_temperature_K` / `xtb_max_iterations` are configurable.
+- Campaign: a failed MACE adsorption screen no longer blocks the barrier
+  calculations; every assessment is followed by a no-compute `decide --dry-run`,
+  so `agent_ranking` is always current.
+- `decide --ids` (repair) limits which candidates are computed on; the belief and
+  ranking keep every candidate.
+- `assess`, the notebook, lit-brief and the campaign context use the latest
+  kinetics record per (candidate, site set, method) (`kinetics.current_records`);
+  previously an arbitrary stale re-run could win.
+- `chemistry.screenable`: `kinetics --candidates` and `decide --library` skip
+  non-computable entries, wrong-direction references and invalid entries with a
+  report (e.g. `examples/candidates-literature.json` can be passed directly).
+
 # Merge: literature + neji_dev_2 (branch merge-neji-dev-2)
 
 Both branches started from master 623e2ac. `literature` reworked the
